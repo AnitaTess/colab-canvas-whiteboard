@@ -1,14 +1,19 @@
 import './App.css';
 import React, { createElement, useLayoutEffect, useState, useEffect } from "react";
 import rough from 'roughjs/bundled/rough.esm';
+import { getStroke } from 'perfect-freehand';
 
 const generator = rough.generator();
 
-
 function createAnElement(id, x1, y1, x2, y2, tool){
-  const center = { x: (x1 + x2) / 2, y: (y1 + y2) / 2 };
+
+  switch (tool){
+    case "line":
+    case "rectangle":
+    case "circle":
+       const center = { x: (x1 + x2) / 2, y: (y1 + y2) / 2 };
   const radius = Math.sqrt(Math.pow(x1 - center.x, 2) + Math.pow(y1 - center.y, 2));
- const roughElement = tool === "line"
+       const roughElement = tool === "line"
     ? generator.line(x1, y1, x2, y2)
     : tool === "rectangle"
       ? generator.rectangle(x1, y1, x2 - x1, y2 - y1)
@@ -16,11 +21,25 @@ function createAnElement(id, x1, y1, x2, y2, tool){
         ? generator.circle(center.x, center.y, radius) : (() => { throw new Error("Invalid elementType. Supported types: 'line', 'rectangle', 'circle'") })();
 
 return {id, x1, y1, x2, y2, tool, roughElement};
+case "pencil":
+  //todo
+  return {id, tool, points: [{x: x1, y: y1}]};
+  default:
+    throw  new Error("Invalid elementType");
+}
 };
 
 function nearPoint(x, y, x1, y1, name){
   return Math.abs(x - x1) < 5 && Math.abs(y - y1) < 5 ? name : null;
 }
+
+const onLine = (x1, y1, x2, y2, x, y, maxDistance = 1) => {
+  const a = { x: x1, y: y1 };
+  const b = { x: x2, y: y2 };
+  const c = { x, y };
+  const offset = distance(a, b) - (distance(a, c) + distance(b, c));
+  return Math.abs(offset) < maxDistance ? "inside" : null;
+};
 
 function isWithinElement(x, y, element) {
   const { tool, x1, x2, y1, y2 } = element;
@@ -44,7 +63,15 @@ function isWithinElement(x, y, element) {
     const distanceToPoint = distance(center, { x, y });
     const radius = distance({ x: x1, y: y1 }, center); // Use the distance from the center to one of the circle's points as the radius
     return distanceToPoint < radius - (radius/2) ? "inside" : null;
-  } else {
+  } else if (tool === "pencil") {
+  const betweenAnyPoint = element.points.some((point, index) => {
+        const nextPoint = element.points[index + 1];
+        if (!nextPoint) return false;
+        return onLine(point.x, point.y, nextPoint.x, nextPoint.y, x, y, 5) != null;
+      });
+      return betweenAnyPoint ? "inside" : null;
+  } 
+  else {
     throw new Error("Invalid elementType. Supported types: 'line', 'rectangle', 'circle'");
   }
 }
@@ -128,6 +155,39 @@ const redo = () => index < history.length -1 && setIndex(prevState => prevState 
   return [history[index], setState, undo, redo];
 }
 
+const getSvgPathFromStroke = stroke => {
+  if (!stroke.length) return "";
+
+  const d = stroke.reduce(
+    (acc, [x0, y0], i, arr) => {
+      const [x1, y1] = arr[(i + 1) % arr.length];
+      acc.push(x0, y0, (x0 + x1) / 2, (y0 + y1) / 2);
+      return acc;
+    },
+    ["M", ...stroke[0], "Q"]
+  );
+
+  d.push("Z");
+  return d.join(" ");
+};
+
+function drawElement(roughCanvas, context, element){
+  switch (element.tool){
+    case "line":
+    case "rectangle":
+    case "circle":
+      roughCanvas.draw(element.roughElement)
+      break;
+    case "pencil":
+      const stroke = getSvgPathFromStroke(getStroke(element.points));
+      context.fill(new Path2D(stroke));
+      break;
+    default: throw new Error("Invalid elementType1");
+  }
+}
+
+const adjustmentRequired = tool => ["line", "rectangle", "circle"].includes(tool);
+
 const App = () => {
 
   const [elements, setElements, undo, redo] = useHistory([]);
@@ -141,7 +201,7 @@ const context = canvas.getContext("2d");
 context.clearRect(0, 0, canvas.width, canvas.height);
 
 const roughCanvas = rough.canvas(canvas);
-elements.forEach(({roughElement}) => roughCanvas.draw(roughElement));
+elements.forEach(element => drawElement(roughCanvas, context, element));
 }, [elements]);
 
 
@@ -164,10 +224,19 @@ useEffect(() => {
 }, [undo, redo]);
 
 function updateElement(id, x1, y1, x2, y2, tool) {
-  const updatedElement = createAnElement(id, x1, y1, x2, y2, tool);
-  const elementsCopy = [...elements];
-  elementsCopy[id] = updatedElement;
-  setElements(elementsCopy, true);
+   const elementsCopy = [...elements];
+   switch (tool){
+    case "line":
+    case "rectangle":
+    case "circle":
+  elementsCopy[id] = createAnElement(id, x1, y1, x2, y2, tool);
+      break;
+    case "pencil":
+       elementsCopy[id].points = [...elementsCopy[id].points, {x: x2, y: y2}]
+      break;
+    default: throw new Error("Invalid elementType1");
+  }
+   setElements(elementsCopy, true);
 }
 
 const handleMouseDown = (event) => {
@@ -175,9 +244,15 @@ const handleMouseDown = (event) => {
   if (tool === "move") {
     const element = getElementAtPosition(clientX, clientY, elements);
     if (element) {
+      if(element.tool === "pencil"){
+const xOffset = element.points.map(point => clientX - point.x);
+const yOffset = element.points.map(point => clientY - point.y);
+setSelectedElement({...element, xOffset, yOffset});
+      }else{
       const offsetX = clientX - element.x1;
       const offsetY = clientY - element.y1;
       setSelectedElement({ ...element, offsetX, offsetY });
+      }
       setElements(prevState => prevState);
 
       if(element.position === "inside"){
@@ -209,13 +284,26 @@ if(tool === "move"){
   updateElement(index, x1, y1, clientX, clientY, tool);
 
 } else if(action === "moving"){
-  const {id, x1, y1, x2, y2, tool, offsetX, offsetY} = selectedElement;
+  if(selectedElement.tool === "pencil"){
+const newPoints = selectedElement.points.map((_ , index) =>({
+  x: clientX - selectedElement.xOffset[index],
+  y: clientY - selectedElement.yOffset[index]
+
+}))
+const elementsCopy = [...elements];
+elementsCopy[selectedElement.id] = {
+...elementsCopy[selectedElement.id],
+points: newPoints
+}
+setElements(elementsCopy, true);
+  }else{
+const {id, x1, y1, x2, y2, tool, offsetX, offsetY} = selectedElement;
   const width = x2 - x1;
   const height = y2 - y1;
   const nexX1 = clientX - offsetX;
   const nexY1 = clientY - offsetY;
-
-  updateElement(id, nexX1, nexY1, nexX1 + width, nexY1 + height, tool);
+   updateElement(id, nexX1, nexY1, nexX1 + width, nexY1 + height, tool);
+  }
 }
 else if(action === "resizing"){
   const {id, tool, position, ...coordinates} = selectedElement;
@@ -229,7 +317,7 @@ const handleMouseUp = () => {
   if(selectedElement){
   const index = selectedElement.id;
   const {id, tool} = elements[index];
-  if(action === "drawing" || action === "resizing"){
+  if((action === "drawing" || action === "resizing") && adjustmentRequired(tool)){
     const {x1, y1, x2, y2} = adjustElementCoordinates(elements[index]);
     updateElement(id, x1, y1, x2, y2, tool);
   }

@@ -1,12 +1,12 @@
 import './App.css';
-import React, { createElement, useLayoutEffect, useState, useEffect } from "react";
+import React, {useLayoutEffect, useState, useEffect, useRef } from "react";
 import rough from 'roughjs/bundled/rough.esm';
 import { getStroke } from 'perfect-freehand';
 
 const generator = rough.generator();
 
+//add new shapes/tools here
 function createAnElement(id, x1, y1, x2, y2, tool){
-
   switch (tool){
     case "line":
     case "rectangle":
@@ -22,8 +22,9 @@ function createAnElement(id, x1, y1, x2, y2, tool){
 
 return {id, x1, y1, x2, y2, tool, roughElement};
 case "pencil":
-  //todo
   return {id, tool, points: [{x: x1, y: y1}]};
+case "text":
+  return {id, tool, x1, y1, x2, y2, text: ""};
   default:
     throw  new Error("Invalid elementType");
 }
@@ -32,7 +33,7 @@ case "pencil":
 function nearPoint(x, y, x1, y1, name){
   return Math.abs(x - x1) < 5 && Math.abs(y - y1) < 5 ? name : null;
 }
-
+//checking if mouse cursor is on the line of painted element
 const onLine = (x1, y1, x2, y2, x, y, maxDistance = 1) => {
   const a = { x: x1, y: y1 };
   const b = { x: x2, y: y2 };
@@ -40,7 +41,7 @@ const onLine = (x1, y1, x2, y2, x, y, maxDistance = 1) => {
   const offset = distance(a, b) - (distance(a, c) + distance(b, c));
   return Math.abs(offset) < maxDistance ? "inside" : null;
 };
-
+//checking if mouse cursor is inside an element
 function isWithinElement(x, y, element) {
   const { tool, x1, x2, y1, y2 } = element;
   if (tool === "rectangle") {
@@ -71,6 +72,9 @@ function isWithinElement(x, y, element) {
       });
       return betweenAnyPoint ? "inside" : null;
   } 
+  else if(tool === "text"){
+    return x >= x1 && x <= x2 && y >= y1 && y <= y2 ? "inside" : null;
+  }
   else {
     throw new Error("Invalid elementType. Supported types: 'line', 'rectangle', 'circle'");
   }
@@ -115,6 +119,7 @@ switch(position){
 }
 }
 
+//resizing
 function resizedCoordinates(clientX, clientY, position, coordinates){
 const {x1, y1, x2, y2} = coordinates
 switch(position){
@@ -133,6 +138,7 @@ switch(position){
 }
 }
 
+//history of actions for redo/undo
 const useHistory = initialState => {
   const [index, setIndex] = useState(0);
   const [history, setHistory] = useState([initialState]); 
@@ -155,6 +161,7 @@ const redo = () => index < history.length -1 && setIndex(prevState => prevState 
   return [history[index], setState, undo, redo];
 }
 
+//getting svg path from pencil drawn element
 const getSvgPathFromStroke = stroke => {
   if (!stroke.length) return "";
 
@@ -170,7 +177,7 @@ const getSvgPathFromStroke = stroke => {
   d.push("Z");
   return d.join(" ");
 };
-
+//drawing chosen element
 function drawElement(roughCanvas, context, element){
   switch (element.tool){
     case "line":
@@ -182,11 +189,43 @@ function drawElement(roughCanvas, context, element){
       const stroke = getSvgPathFromStroke(getStroke(element.points));
       context.fill(new Path2D(stroke));
       break;
+      case "text":
+        context.textBaseline = 'top';
+        context.font = '24px sans-serif';
+        context.fillText(element.text, element.x1, element.y1);
+        break;
     default: throw new Error("Invalid elementType1");
   }
 }
 
 const adjustmentRequired = tool => ["line", "rectangle", "circle"].includes(tool);
+
+const usePressedKeys = () => {
+  const [pressedKeys, setPressedKeys] = useState(new Set());
+
+  useEffect(() => {
+    const handleKeyDown = event => {
+      setPressedKeys(prevKeys => new Set(prevKeys).add(event.key));
+    };
+
+    const handleKeyUp = event => {
+      setPressedKeys(prevKeys => {
+        const updatedKeys = new Set(prevKeys);
+        updatedKeys.delete(event.key);
+        return updatedKeys;
+      });
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("keyup", handleKeyUp);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("keyup", handleKeyUp);
+    };
+  }, []);
+
+  return pressedKeys;
+};
 
 const App = () => {
 
@@ -194,16 +233,38 @@ const App = () => {
   const [action, setAction] = useState("none");
   const [tool, setTool] = useState("line");
   const [selectedElement, setSelectedElement] = useState(null);
+  const [panOffset, setPanOffset] = React.useState({ x: 0, y: 0 });
+  const [startPanMousePosition, setStartPanMousePosition] = React.useState({ x: 0, y: 0 });
+  const [scale, setScale] = React.useState(1);
+  const [scaleOffset, setScaleOffset] = React.useState({ x: 0, y: 0 });
+  const pressedKeys = usePressedKeys();
+  const textAreaRef = useRef(null);
+  const [image, setImage] = useState(null);
 
 useLayoutEffect(() => {
   const canvas = document.getElementById("canvas");
 const context = canvas.getContext("2d");
 context.clearRect(0, 0, canvas.width, canvas.height);
 
+const scaleWidth = canvas.width * scale;
+const scaleHeight = canvas.height * scale;
+const scaleOffsetX = (scaleWidth - canvas.width) /2;
+const scaleOffsetY = (scaleHeight - canvas.height) /2;
+setScaleOffset({x: scaleOffsetX, y: scaleOffsetY})
+context.save();
+context.translate(panOffset.x * scale - scaleOffsetX, panOffset.y * scale - scaleOffsetY);
+context.scale(scale, scale);
 const roughCanvas = rough.canvas(canvas);
-elements.forEach(element => drawElement(roughCanvas, context, element));
-}, [elements]);
-
+if (image) {
+  context.drawImage(image, 0, 0, canvas.width, canvas.height);
+}
+elements.forEach(element => {
+  if (action === "writing" && selectedElement.id === element.id) return;
+  drawElement(roughCanvas, context, element);
+});
+context.restore();
+}, [elements, action, selectedElement, panOffset, scale, image])
+  
 
 useEffect(() => {
   const undoRedoFunction = (event) => {
@@ -223,7 +284,27 @@ useEffect(() => {
   };
 }, [undo, redo]);
 
-function updateElement(id, x1, y1, x2, y2, tool) {
+useEffect(() => {
+  const panOrZoomFunction = event => {
+    if (pressedKeys.has("Meta") || pressedKeys.has("Control")) onZoom(event.deltaY * -0.01);
+    else setPanOffset(prev => ({ x: prev.x - event.deltaX, y: prev.y - event.deltaY }));
+  };
+
+  document.addEventListener("wheel", panOrZoomFunction);
+  return () => {
+    document.removeEventListener("wheel", panOrZoomFunction);
+  };
+}, [pressedKeys]);
+
+useEffect(() => {
+  const textArea = textAreaRef.current;
+  if(action === "writing"){
+    setTimeout(function(){textArea.focus();}, 50);
+    textArea.value = selectedElement.text;
+  }
+}, [action, selectedElement])
+
+function updateElement(id, x1, y1, x2, y2, tool, options) {
    const elementsCopy = [...elements];
    switch (tool){
     case "line":
@@ -234,13 +315,38 @@ function updateElement(id, x1, y1, x2, y2, tool) {
     case "pencil":
        elementsCopy[id].points = [...elementsCopy[id].points, {x: x2, y: y2}]
       break;
+      case "text":
+        const textWidth = document
+          .getElementById("canvas")
+          .getContext("2d")
+          .measureText(options.text).width;
+        const textHeight = 24;
+        elementsCopy[id] = {
+          ...createAnElement(id, x1, y1, x1 + textWidth, y1 + textHeight, tool),
+          text: options.text,
+        };
+        break;
     default: throw new Error("Invalid elementType1");
   }
    setElements(elementsCopy, true);
 }
 
+function getMouseCoordinates(event){
+  const clientX = (event.clientX - panOffset.x * scale + scaleOffset.x) / scale;
+  const clientY = (event.clientY - panOffset.y * scale + scaleOffset.y) / scale;
+  return { clientX, clientY };
+}
+
 const handleMouseDown = (event) => {
-  const { clientX, clientY } = event;
+  if (action === "writing") return;
+  const { clientX, clientY } = getMouseCoordinates(event);
+
+  if (event.button === 1 || pressedKeys.has(" ")) {
+    setAction("panning");
+    setStartPanMousePosition({ x: clientX, y: clientY });
+    return;
+  }
+
   if (tool === "move") {
     const element = getElementAtPosition(clientX, clientY, elements);
     if (element) {
@@ -266,12 +372,23 @@ setSelectedElement({...element, xOffset, yOffset});
     const id = elements.length;
     const element = createAnElement(id, clientX, clientY, clientX, clientY, tool);
     setElements((prevState) => [...prevState, element]);
-    setAction("drawing");
+    setSelectedElement(element);
+    setAction(tool === "text" ? "writing" : "drawing");
   }
 };
 
 const handleMouseMove = (event) => {
-  const {clientX, clientY} = event;
+  const {clientX, clientY} = getMouseCoordinates(event);
+
+  if (action === "panning") {
+    const deltaX = clientX - startPanMousePosition.x;
+    const deltaY = clientY - startPanMousePosition.y;
+    setPanOffset({
+      x: panOffset.x + deltaX,
+      y: panOffset.y + deltaY,
+    });
+    return;
+  }
 
 if(tool === "move"){
   const element = getElementAtPosition(clientX, clientY, elements);
@@ -288,7 +405,6 @@ if(tool === "move"){
 const newPoints = selectedElement.points.map((_ , index) =>({
   x: clientX - selectedElement.xOffset[index],
   y: clientY - selectedElement.yOffset[index]
-
 }))
 const elementsCopy = [...elements];
 elementsCopy[selectedElement.id] = {
@@ -302,7 +418,8 @@ const {id, x1, y1, x2, y2, tool, offsetX, offsetY} = selectedElement;
   const height = y2 - y1;
   const nexX1 = clientX - offsetX;
   const nexY1 = clientY - offsetY;
-   updateElement(id, nexX1, nexY1, nexX1 + width, nexY1 + height, tool);
+  const options = tool === "text" ? {text: selectedElement.text} : {};
+   updateElement(id, nexX1, nexY1, nexX1 + width, nexY1 + height, tool, options);
   }
 }
 else if(action === "resizing"){
@@ -313,8 +430,13 @@ else if(action === "resizing"){
 }
 
 
-const handleMouseUp = () => {
+const handleMouseUp = event => {
+ const {clientX, clientY} = getMouseCoordinates(event);
   if(selectedElement){
+    if(selectedElement.tool === "text" && clientX - selectedElement.offsetX === selectedElement.x1 && clientY - selectedElement.offsetY === selectedElement.y1){
+setAction("writing");
+return;
+    }
   const index = selectedElement.id;
   const {id, tool} = elements[index];
   if((action === "drawing" || action === "resizing") && adjustmentRequired(tool)){
@@ -322,13 +444,38 @@ const handleMouseUp = () => {
     updateElement(id, x1, y1, x2, y2, tool);
   }
 }
+if(action === "writing") return;
   setAction("none");
   setSelectedElement(null);
 };
 
+const handleBlur = event => {
+  const {id, x1, y1, tool} = selectedElement;
+  setAction("none");
+  setSelectedElement(null);
+  updateElement(id, x1, y1, null, null, tool, {text: event.target.value})
+}
+
+const onZoom = increment => {
+  setScale(prevState => Math.min(Math.max(prevState + increment, 0.1), 20));
+};
+
+const handleImageUpload = (event) => {
+  const file = event.target.files[0];
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    const img = new Image();
+    img.src = e.target.result;
+    img.onload = () => {
+      setImage(img);
+    };
+  };
+  reader.readAsDataURL(file);
+};
+
 return (
 <div>
-  <div style = {{position: "fixed"}}>
+  <div style = {{position: "fixed", zIndex: 2, backgroundColor: "white", padding: 10, width: "100%"}}>
 <input
 type="radio"
 id="line"
@@ -349,14 +496,21 @@ id="circle"
 checked={tool === "circle"}
 onChange={() => setTool("circle")}
 />
-<label htmlFor="pencil">Circle</label>
+<label htmlFor="circle">Circle</label>
 <input
 type="radio"
 id="pencil"
 checked={tool === "pencil"}
 onChange={() => setTool("pencil")}
 />
-<label htmlFor="circle">Pencil</label>
+<label htmlFor="pencil">Pencil</label>
+<input
+type="radio"
+id="text"
+checked={tool === "text"}
+onChange={() => setTool("text")}
+/>
+<label htmlFor="text">Text</label>
   <input
 type="radio"
 id="move"
@@ -364,11 +518,37 @@ checked={tool === "move"}
 onChange={() => setTool("move")}
 />
 <label htmlFor="move">Move</label>
+
+<label htmlFor="image"><br />Choose a profile picture:</label>
+<input name='image' type="file" accept="image/*" onChange={handleImageUpload}/>
 </div>
-<div style={{ position: "fixed", zIndex: 2, bottom: 0, padding: 10 }}>
+
+<div style={{ position: "fixed", zIndex: 2, bottom: 0, padding: 10, backgroundColor: "white", width: "100%"}}>
         <button onClick={undo}>Undo</button>
         <button onClick={redo}>Redo</button>
+        <span>   </span>
+        <button onClick={() => onZoom(-0.1)}>-</button>
+        <span onClick={() => setScale(1)}>
+        {" "}{new Intl.NumberFormat("en-GB", { style: "percent" }).format(scale)}{" "}
+        </span>
+        <button onClick={() => onZoom(0.1)}>+</button>
       </div>
+      {action === "writing" ? <textarea ref={textAreaRef} onBlur={handleBlur}
+          style={{
+            position: "fixed",
+            top: (selectedElement.y1 - 2) * scale + panOffset.y * scale - scaleOffset.y,
+            left: selectedElement.x1 * scale + panOffset.x * scale - scaleOffset.x,
+            font: `${24 * scale}px sans-serif`,
+            margin: 0,
+            padding: 0,
+            border: 0,
+            outline: 0,
+            resize: "auto",
+            overflow: "hidden",
+            whiteSpace: "pre",
+            background: "transparent",
+            zIndex: 2,
+          }}/> : null}
 <canvas 
 id="canvas" 
 width={window.innerWidth} 
@@ -376,6 +556,7 @@ height={window.innerHeight}
 onMouseDown={handleMouseDown}
 onMouseMove={handleMouseMove}
 onMouseUp={handleMouseUp}
+style={{ position: "absolute", zIndex: 1}}
 >Canvas</canvas>
 </div>
 )};
